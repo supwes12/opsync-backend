@@ -43,3 +43,6 @@ Thumbs.db
 
 # Migrations versions (optional)
 migrations/versions/
+
+# Build docs (local reference only)
+_build-docs/
