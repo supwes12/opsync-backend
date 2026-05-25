@@ -9,6 +9,7 @@ from app.models import Restaurant
 from app.utils.decorators import role_required
 
 restaurants_bp = Blueprint('restaurants', __name__)
+restaurants_bp.strict_slashes = False
 
 
 @restaurants_bp.route('/', methods=['GET'])

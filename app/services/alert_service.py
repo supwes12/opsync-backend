@@ -99,7 +99,8 @@ class AlertService:
     @staticmethod
     def _check_queue_surge(snapshot, shift_id):
         alerts = []
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+        # Use naive datetime to match DB storage (SQLite stores naive datetimes)
+        cutoff = datetime.now() - timedelta(minutes=30)
 
         trailing_snapshots = (
             OperationalSnapshot.query

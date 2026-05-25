@@ -1,5 +1,5 @@
 """RecommendationAction model - manager responses to recommendations."""
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.extensions import db
 from app.utils.helpers import generate_uuid
@@ -13,7 +13,7 @@ class RecommendationAction(db.Model):
     user_id = db.Column(db.String(36), db.ForeignKey('users.user_id'), nullable=False)
     response_type = db.Column(db.String(20), nullable=False)
     notes = db.Column(db.Text, nullable=True)
-    responded_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    responded_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
     def to_dict(self):
         user_name = None

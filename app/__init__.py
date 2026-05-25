@@ -5,6 +5,7 @@ from app.extensions import db, migrate, jwt, bcrypt, cors
 
 def create_app(config_name='development'):
     app = Flask(__name__)
+    app.url_map.strict_slashes = False
     app.config.from_object(config_by_name[config_name])
 
     # Initialize extensions
@@ -29,7 +30,8 @@ def create_app(config_name='development'):
     @app.shell_context_processor
     def make_shell_context():
         from app.models import Restaurant, User, Shift, OperationalSnapshot
-        from app.models import Recommendation, RecommendationAction, Alert
+        from app.models import Recommendation, RecommendationAction, Alert, Settings
+        from app.models import AuditLog
         return {
             'db': db,
             'Restaurant': Restaurant,
@@ -39,6 +41,8 @@ def create_app(config_name='development'):
             'Recommendation': Recommendation,
             'RecommendationAction': RecommendationAction,
             'Alert': Alert,
+            'Settings': Settings,
+            'AuditLog': AuditLog,
         }
 
     @app.cli.command('seed')

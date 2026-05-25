@@ -1,5 +1,5 @@
 """Restaurant model - physical QSR locations."""
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 
 from app.extensions import db
 from app.utils.helpers import generate_uuid
@@ -17,7 +17,9 @@ class Restaurant(db.Model):
     format_type = db.Column(db.String(20), nullable=False)
     open_time = db.Column(db.Time, nullable=False)
     close_time = db.Column(db.Time, nullable=False)
-    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    phone = db.Column(db.String(20), nullable=True)
+    timezone = db.Column(db.String(50), nullable=True, default='America/New_York')
+    created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(dt_timezone.utc))
 
     shifts = db.relationship('Shift', backref='restaurant', lazy='dynamic')
     users = db.relationship('User', backref='restaurant', lazy='dynamic')
@@ -33,6 +35,8 @@ class Restaurant(db.Model):
             'format_type': self.format_type,
             'open_time': self.open_time.isoformat() if self.open_time else None,
             'close_time': self.close_time.isoformat() if self.close_time else None,
+            'phone': self.phone or '',
+            'timezone': self.timezone or 'America/New_York',
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
 

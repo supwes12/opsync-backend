@@ -193,19 +193,18 @@ class RecommendationEngine:
     @staticmethod
     def _check_prep_timing(snapshot, shift):
         recs = []
-        now = datetime.now(timezone.utc)
+        # Use naive datetime to match DB storage (SQLite stores naive datetimes)
+        now = datetime.now()
         end_time = shift.end_time
 
         if not end_time:
             return recs
 
-        if end_time.tzinfo is None:
-            from datetime import timezone as tz
-            end_time_aware = end_time.replace(tzinfo=tz.utc)
-        else:
-            end_time_aware = end_time
+        # Strip timezone info if present to ensure consistent comparison
+        if end_time.tzinfo is not None:
+            end_time = end_time.replace(tzinfo=None)
 
-        minutes_to_end = (end_time_aware - now).total_seconds() / 60
+        minutes_to_end = (end_time - now).total_seconds() / 60
 
         if 0 < minutes_to_end <= 60:
             next_shift = (

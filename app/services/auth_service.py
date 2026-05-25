@@ -35,7 +35,21 @@ class AuthService:
         db.session.add(user)
         db.session.commit()
 
-        return {'message': 'User registered successfully', 'user': user.to_dict()}
+        # Generate token with restaurant_id claim
+        access_token = create_access_token(
+            identity=user.user_id,
+            additional_claims={
+                'email': user.email,
+                'role': user.role,
+                'restaurant_id': user.restaurant_id,
+            },
+        )
+
+        return {
+            'message': 'User registered successfully',
+            'user': user.to_dict(),
+            'access_token': access_token,
+        }
 
     @staticmethod
     def login_user(email, password):

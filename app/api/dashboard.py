@@ -5,15 +5,17 @@ from flask_jwt_extended import jwt_required, get_jwt
 from app.services.dashboard_service import DashboardService
 
 dashboard_bp = Blueprint('dashboard', __name__)
+dashboard_bp.strict_slashes = False
 
 
 @dashboard_bp.route('/current', methods=['GET'])
 @jwt_required()
 def get_current_state():
     claims = get_jwt()
+    shift_id = request.args.get('shift_id')
     restaurant_id = request.args.get('restaurant_id', claims.get('restaurant_id'))
 
-    result = DashboardService.get_current_dashboard(restaurant_id)
+    result = DashboardService.get_current_dashboard(restaurant_id, shift_id=shift_id)
     if 'error' in result:
         return jsonify({'error': result['error'], 'message': result['message']}), result['status_code']
 
@@ -23,11 +25,28 @@ def get_current_state():
 @dashboard_bp.route('/metrics', methods=['GET'])
 @jwt_required()
 def get_metrics():
+    claims = get_jwt()
     shift_id = request.args.get('shift_id')
-    if not shift_id:
-        return jsonify({'error': 'Bad request', 'message': 'shift_id is required'}), 400
 
-    minutes = request.args.get('minutes', 60, type=int)
+    # Auto-detect shift_id from restaurant if not provided
+    if not shift_id:
+        restaurant_id = request.args.get('restaurant_id', claims.get('restaurant_id'))
+        from app.models import Shift
+        shift = Shift.query.filter_by(
+            restaurant_id=restaurant_id, status='active'
+        ).first()
+        if not shift:
+            return jsonify({'error': 'Not found', 'message': 'No active shift found'}), 404
+        shift_id = shift.shift_id
+
+    # Accept both 'minutes' and 'hours' params
+    hours = request.args.get('hours', type=float)
+    minutes = request.args.get('minutes', type=int)
+    if hours is not None:
+        minutes = int(hours * 60)
+    elif minutes is None:
+        minutes = 60
+
     result = DashboardService.get_shift_metrics(shift_id, minutes)
     if 'error' in result:
         return jsonify({'error': result['error'], 'message': result['message']}), result['status_code']
@@ -41,8 +60,9 @@ def get_trends():
     claims = get_jwt()
     restaurant_id = request.args.get('restaurant_id', claims.get('restaurant_id'))
     days = request.args.get('days', 7, type=int)
+    shift_id = request.args.get('shift_id')
 
-    result = DashboardService.get_trends(restaurant_id, days)
+    result = DashboardService.get_trends(restaurant_id, days, shift_id=shift_id)
     return jsonify(result), 200
 
 

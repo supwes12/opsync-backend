@@ -39,9 +39,24 @@ class OperationalSnapshot(db.Model):
             self.inventory_json = None
 
     def to_dict(self):
+        staff = max(self.staff_count, 1) if self.staff_count else 1
+        queue_depth = round((self.total_orders or 0) / staff)
         return {
             'snapshot_id': self.snapshot_id,
             'shift_id': self.shift_id,
+            'timestamp': self.captured_at.isoformat() if self.captured_at else None,
+            'current_orders': self.total_orders,
+            'avg_ticket_time_seconds': self.avg_ticket_time_sec,
+            'queue_depth': queue_depth,
+            'staff_on_duty': self.staff_count,
+            'drive_thru_count': self.drive_thru_orders,
+            'dine_in_count': self.dine_in_orders,
+            'delivery_count': self.delivery_orders,
+            'pickup_count': self.pickup_orders,
+            'kitchen_staff': self.kitchen_staff,
+            'front_staff': self.front_staff,
+            'inventory': self.inventory,
+            # Keep original field names as well for backward compat with services
             'captured_at': self.captured_at.isoformat() if self.captured_at else None,
             'total_orders': self.total_orders,
             'dine_in_orders': self.dine_in_orders,
@@ -50,9 +65,6 @@ class OperationalSnapshot(db.Model):
             'delivery_orders': self.delivery_orders,
             'avg_ticket_time_sec': self.avg_ticket_time_sec,
             'staff_count': self.staff_count,
-            'kitchen_staff': self.kitchen_staff,
-            'front_staff': self.front_staff,
-            'inventory': self.inventory,
         }
 
     def __repr__(self):

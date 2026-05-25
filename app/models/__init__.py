@@ -6,8 +6,11 @@ from app.models.operational_snapshot import OperationalSnapshot
 from app.models.recommendation import Recommendation
 from app.models.recommendation_action import RecommendationAction
 from app.models.alert import Alert
+from app.models.settings import Settings
+from app.models.audit_log import AuditLog
 
 __all__ = [
     'Restaurant', 'User', 'Shift', 'OperationalSnapshot',
-    'Recommendation', 'RecommendationAction', 'Alert',
+    'Recommendation', 'RecommendationAction', 'Alert', 'Settings',
+    'AuditLog',
 ]

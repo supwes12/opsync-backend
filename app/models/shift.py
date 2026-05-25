@@ -14,6 +14,7 @@ class Shift(db.Model):
     end_time = db.Column(db.DateTime, nullable=False)
     shift_type = db.Column(db.String(20), nullable=False)
     status = db.Column(db.String(20), nullable=False, default='active')
+    notes = db.Column(db.String(500), nullable=True)
 
     snapshots = db.relationship('OperationalSnapshot', backref='shift', lazy='dynamic')
     recommendations = db.relationship('Recommendation', backref='shift', lazy='dynamic')
@@ -23,6 +24,17 @@ class Shift(db.Model):
         manager_name = None
         if self.manager:
             manager_name = f'{self.manager.first_name} {self.manager.last_name}'
+
+        # Get staff_count from the latest snapshot for this shift
+        from app.models.operational_snapshot import OperationalSnapshot
+        latest_snapshot = (
+            OperationalSnapshot.query
+            .filter_by(shift_id=self.shift_id)
+            .order_by(OperationalSnapshot.captured_at.desc())
+            .first()
+        )
+        staff_count = latest_snapshot.staff_count if latest_snapshot else 0
+
         return {
             'shift_id': self.shift_id,
             'restaurant_id': self.restaurant_id,
@@ -33,6 +45,8 @@ class Shift(db.Model):
             'end_time': self.end_time.isoformat() if self.end_time else None,
             'shift_type': self.shift_type,
             'status': self.status,
+            'staff_count': staff_count,
+            'notes': self.notes,
         }
 
     def __repr__(self):

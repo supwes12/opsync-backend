@@ -1,5 +1,5 @@
 """User model - system users with roles (admin, manager, viewer)."""
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.extensions import db, bcrypt
 from app.utils.helpers import generate_uuid
@@ -16,7 +16,7 @@ class User(db.Model):
     last_name = db.Column(db.String(50), nullable=False)
     role = db.Column(db.String(20), nullable=False)
     is_active = db.Column(db.Boolean, nullable=False, default=True)
-    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
     recommendation_actions = db.relationship('RecommendationAction', backref='user', lazy='dynamic')
     managed_shifts = db.relationship('Shift', backref='manager', lazy='dynamic', foreign_keys='Shift.manager_id')
@@ -29,9 +29,13 @@ class User(db.Model):
         return bcrypt.check_password_hash(self.password_hash, password)
 
     def to_dict(self):
+        restaurant_name = None
+        if self.restaurant:
+            restaurant_name = self.restaurant.name
         return {
             'user_id': self.user_id,
             'restaurant_id': self.restaurant_id,
+            'restaurant_name': restaurant_name,
             'email': self.email,
             'first_name': self.first_name,
             'last_name': self.last_name,
