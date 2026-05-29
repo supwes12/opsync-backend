@@ -44,6 +44,15 @@ def create_snapshot():
             'message': 'total_orders and staff_count are required',
         }), 400
 
+    try:
+        total_orders = int(total_orders)
+        staff_count = int(staff_count)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Bad request', 'message': 'total_orders and staff_count must be integers'}), 400
+
+    if total_orders < 0 or staff_count < 0:
+        return jsonify({'error': 'Bad request', 'message': 'total_orders and staff_count must be non-negative'}), 400
+
     # Parse captured_at or default to now
     captured_at_str = data.get('captured_at')
     if captured_at_str:
@@ -57,13 +66,13 @@ def create_snapshot():
     snapshot = OperationalSnapshot(
         shift_id=shift_id,
         captured_at=captured_at,
-        total_orders=int(total_orders),
+        total_orders=total_orders,
         dine_in_orders=data.get('dine_in_orders'),
         drive_thru_orders=data.get('drive_thru_orders'),
         pickup_orders=data.get('pickup_orders'),
         delivery_orders=data.get('delivery_orders'),
         avg_ticket_time_sec=data.get('avg_ticket_time_sec'),
-        staff_count=int(staff_count),
+        staff_count=staff_count,
         kitchen_staff=data.get('kitchen_staff'),
         front_staff=data.get('front_staff'),
     )
