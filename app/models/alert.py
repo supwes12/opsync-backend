@@ -29,6 +29,7 @@ class Alert(db.Model):
             'stockout_risk': 'Inventory Stockout Risk',
             'labor_imbalance': 'Labor Imbalance',
             'labor_overstaffed_front': 'Front Counter Overstaffed',
+            'demand_surge': 'Demand Surge Detected',
         }
         title_body = type_titles.get(self.alert_type)
         if not title_body:

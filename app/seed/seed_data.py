@@ -8,7 +8,8 @@ from app import create_app
 from app.extensions import db
 from app.models import (
     Restaurant, User, Shift, OperationalSnapshot,
-    Recommendation, RecommendationAction, Alert, Settings
+    Recommendation, RecommendationAction, Alert, Settings,
+    StaffMember, StaffSchedule,
 )
 
 random.seed(42)
@@ -23,6 +24,8 @@ def clear_all_data():
     Recommendation.query.delete()
     OperationalSnapshot.query.delete()
     Shift.query.delete()
+    StaffSchedule.query.delete()
+    StaffMember.query.delete()
     Settings.query.delete()
     User.query.delete()
     Restaurant.query.delete()
@@ -221,7 +224,7 @@ def _generate_snapshot_for_hour(shift, hour, day_factor=1.0):
         18: 38, 19: 35, 20: 28, 21: 18, 22: 10,
     }
     base_orders = hour_profiles.get(hour, 10)
-    total = max(2, int(base_orders * day_factor + random.randint(-5, 5)))
+    total = max(2, int(base_orders * day_factor + random.randint(-2, 2)))
 
     # Channel distribution
     dr = max(0, int(total * 0.35) + random.randint(-2, 2))
@@ -291,14 +294,12 @@ def seed_snapshots(shifts):
         is_today = shift.shift_date == today
         is_downtown = shift.restaurant and shift.restaurant.city == 'Dallas'
 
-        # Day-to-day variation factor
         day_offset = (today - shift.shift_date).days
-        # Slight variation: weekdays busier, older days slightly different
         weekday = shift.shift_date.weekday()
-        if weekday in (5, 6):  # weekend
-            day_factor = random.uniform(1.05, 1.25)
+        if weekday in (5, 6):  # weekend — slightly busier
+            day_factor = 1.10 + (weekday - 5) * 0.05
         else:
-            day_factor = random.uniform(0.85, 1.10)
+            day_factor = 0.95 + weekday * 0.02
 
         start_hour = shift.start_time.hour
         end_hour = shift.end_time.hour
@@ -306,36 +307,38 @@ def seed_snapshots(shifts):
             end_hour = 23
 
         # Today's Downtown lunch shift: detailed 5-minute snapshots
+        # Simulates that it's currently ~12:30 PM during peak lunch rush.
+        # 19 snapshots from 11:00 to 12:30 — ramp then peak.
+        # The latest snapshot should show a busy restaurant.
         if is_today and is_downtown and shift.shift_type == 'lunch':
             today_downtown_lunch = shift
-            for i in range(36):
-                t = datetime(today.year, today.month, today.day, 11, 0) + timedelta(minutes=i * 5)
-                minutes_in = i * 5
+            # 7 snapshots: 11:00 through 12:30 (15-min intervals)
+            for i in range(7):
+                t = datetime(today.year, today.month, today.day, 11, 0) + timedelta(minutes=i * 15)
+                minutes_in = i * 15
 
                 if minutes_in < 60:
                     phase = 'ramp'
-                    base_orders = 5 + int(30 * (minutes_in / 60))
-                    base_ticket = 90 + int(50 * (minutes_in / 60))
-                    staff, kitchen, front = 6, 3, 3
-                elif minutes_in < 120:
+                    base_orders = 18 + int(20 * (minutes_in / 60))
+                    base_ticket = 90 + int(60 * (minutes_in / 60))
+                    staff, kitchen, front = 7, 4, 3
+                else:
                     phase = 'peak'
                     peak_min = minutes_in - 60
-                    base_orders = 40 + int(15 * (peak_min / 60))
-                    base_ticket = 150 + int(90 * (peak_min / 60))
-                    staff, kitchen, front = 6, 3, 3
-                else:
-                    phase = 'cool'
-                    cool_min = minutes_in - 120
-                    base_orders = 30 - int(10 * (cool_min / 60))
-                    base_ticket = 130 - int(30 * (cool_min / 60))
-                    staff, kitchen, front = 5, 3, 2
+                    base_orders = 38 + int(10 * (peak_min / 60))
+                    base_ticket = 155 + int(40 * (peak_min / 60))
+                    staff, kitchen, front = 8, 4, 4
 
-                total = max(2, base_orders + random.randint(-3, 3))
+                total = max(2, base_orders + random.randint(-2, 2))
+                # Channel split: drive-thru 40%, delivery 25%, dine-in 20%, pickup 15%
                 dr = max(0, int(total * 0.40) + random.randint(-2, 2))
-                dt = max(0, int(total * 0.25) + random.randint(-1, 1))
-                pk = max(0, int(total * 0.20) + random.randint(-1, 1))
-                dl = max(0, total - dr - dt - pk)
-                ticket = max(60, base_ticket + random.randint(-10, 10))
+                dl = max(0, int(total * 0.25) + random.randint(-1, 2))
+                dt = max(0, int(total * 0.20) + random.randint(-1, 1))
+                pk = max(0, total - dr - dl - dt)
+                ticket = max(60, base_ticket + random.randint(-12, 12))
+
+                # Make queue_depth realistic for the snapshot model
+                # (queue_depth is computed as total_orders / staff in to_dict)
 
                 snap = OperationalSnapshot(
                     shift_id=shift.shift_id,
@@ -352,7 +355,7 @@ def seed_snapshots(shifts):
                 )
                 snap.inventory = _make_inventory(
                     phase,
-                    minutes_in if phase == 'ramp' else minutes_in - 60 if phase == 'peak' else minutes_in - 120,
+                    minutes_in if phase == 'ramp' else minutes_in - 60,
                 )
                 db.session.add(snap)
                 snapshots.append(snap)
@@ -387,107 +390,188 @@ def seed_recommendations(shifts, lunch_snapshots):
 
     if downtown_lunch and lunch_snapshots:
         peak_snaps = [s for s in lunch_snapshots if s.avg_ticket_time_sec >= 150]
-        cooldown_snaps = [s for s in lunch_snapshots if s.avg_ticket_time_sec < 130]
+        ramp_snaps = [s for s in lunch_snapshots if s.avg_ticket_time_sec < 150]
+
+        # Helper to safely pick a snapshot by index with fallback
+        def _pick(lst, idx, fallback_lst, fallback_idx):
+            if len(lst) > idx:
+                return lst[idx]
+            return fallback_lst[min(fallback_idx, len(fallback_lst) - 1)]
 
         rec_defs = [
+            # --- HIGH PRIORITY (active - need manager attention) ---
             {
-                'snap': peak_snaps[0] if peak_snaps else lunch_snapshots[12],
+                'snap': _pick(peak_snaps, 0, lunch_snapshots, 12),
                 'rec_type': 'labor',
                 'priority': 'high',
-                'title': 'Move 1 staff from front to kitchen',
-                'description': 'Kitchen is falling behind on ticket times during lunch peak. Moving one front counter staff to assist with grill and assembly will reduce average ticket time.',
-                'rationale': f'Average ticket time has reached {peak_snaps[0].avg_ticket_time_sec if peak_snaps else 180}s, exceeding the 150s threshold with {peak_snaps[0].total_orders if peak_snaps else 40}+ orders in queue.',
-                'suggested_action': 'Reassign one front counter team member to kitchen grill station.',
+                'title': 'Reallocate 1 front counter staff to drive-thru',
+                'description': (
+                    'Drive-thru is currently bottlenecked with 16 vehicles in queue and average wait times exceeding 6 minutes. '
+                    'Front counter has 3 staff serving only 4 dine-in customers. Moving one front staff to drive-thru expediting '
+                    'will reduce queue wait by an estimated 35% based on historical throughput data.'
+                ),
+                'rationale': (
+                    f'Drive-thru accounts for 40% of current revenue but ticket time has reached '
+                    f'{peak_snaps[0].avg_ticket_time_sec if peak_snaps else 180}s. '
+                    f'Front counter utilization is at 22% while drive-thru is at 94%. '
+                    f'Rebalancing will normalize throughput across channels.'
+                ),
+                'suggested_action': 'Move one front counter team member to drive-thru window #2 for order handoff and bagging.',
                 'is_active': True,
             },
             {
-                'snap': peak_snaps[2] if len(peak_snaps) > 2 else lunch_snapshots[15],
-                'rec_type': 'labor',
-                'priority': 'medium',
-                'title': 'Consider calling in additional staff',
-                'description': 'Current staffing of 6 is insufficient for sustained 50+ orders per hour. An additional team member would prevent service degradation.',
-                'rationale': 'Order volume has exceeded 45 orders with only 6 staff on duty. Industry standard is 1 staff per 8 orders/hr.',
-                'suggested_action': 'Call in one off-duty team member for a 3-hour shift.',
-                'is_active': True,
-            },
-            {
-                'snap': peak_snaps[3] if len(peak_snaps) > 3 else lunch_snapshots[18],
+                'snap': _pick(peak_snaps, 3, lunch_snapshots, 16),
                 'rec_type': 'inventory',
                 'priority': 'high',
-                'title': 'Chicken breast approaching stockout',
-                'description': 'Chicken breast inventory has dropped below 20% of daily par level. At current consumption rate, stockout is projected within 45 minutes.',
-                'rationale': 'Current chicken breast: 15 pieces remaining vs 100 par. Consumption rate: ~2 pieces/min during peak.',
-                'suggested_action': 'Place emergency order with supplier or pull from freezer backup.',
+                'title': 'Begin emergency chicken prep — projected stockout in 45 min',
+                'description': (
+                    'Chicken breast inventory has dropped to 14 pieces against a par of 100. '
+                    'At the current consumption rate of 2.1 pieces per minute, complete stockout is projected in approximately 7 minutes. '
+                    'Chicken items represent 28% of current orders. A stockout will force menu modifications and damage customer satisfaction.'
+                ),
+                'rationale': (
+                    'Chicken breast: 14 remaining / 100 par (14%). Consumption rate: 2.1/min during peak. '
+                    'Freezer backup has ~40 pieces requiring 12-min thaw cycle. '
+                    'Supplier emergency delivery ETA is 35 minutes if called now.'
+                ),
+                'suggested_action': 'Immediately pull chicken from freezer backup and begin thaw. Simultaneously place emergency call to distributor for same-day delivery.',
                 'is_active': True,
             },
             {
-                'snap': peak_snaps[1] if len(peak_snaps) > 1 else lunch_snapshots[14],
-                'rec_type': 'inventory',
+                'snap': _pick(peak_snaps, 4, lunch_snapshots, 17),
+                'rec_type': 'operations',
+                'priority': 'high',
+                'title': 'Open second drive-thru window to reduce queue',
+                'description': (
+                    'Drive-thru queue has reached 16 vehicles with average service time of 312 seconds per vehicle. '
+                    'Opening the second window for order handoff will split the bottleneck and reduce effective wait time by 40-50%.'
+                ),
+                'rationale': (
+                    'Current single-window throughput: ~12 vehicles/hr. Dual-window capacity: ~20 vehicles/hr. '
+                    'Queue depth of 16 means last car waits ~80 minutes at current rate. '
+                    'Industry benchmark for acceptable drive-thru wait: under 4 minutes.'
+                ),
+                'suggested_action': 'Activate Window #2 — assign one staff to payment/handoff while primary window handles order-taking.',
+                'is_active': True,
+            },
+            # --- MEDIUM PRIORITY ---
+            {
+                'snap': _pick(peak_snaps, 2, lunch_snapshots, 15),
+                'rec_type': 'labor',
                 'priority': 'medium',
-                'title': 'French fries below threshold',
-                'description': 'French fry supply has fallen below 30% of daily par. Consider prepping an additional batch.',
-                'rationale': 'Current french fries: 20 lbs remaining vs 80 par. Peak demand continues for estimated 30 more minutes.',
-                'suggested_action': 'Start prepping additional fry batch immediately.',
+                'title': 'Consider calling in additional kitchen staff for dinner rush',
+                'description': (
+                    'Current kitchen team of 4 is strained at 94% utilization during lunch. '
+                    'Dinner rush historically brings 15-20% higher volume on this day of the week. '
+                    'Calling in one additional kitchen staff member now gives 90 minutes lead time for shift prep.'
+                ),
+                'rationale': (
+                    'Kitchen utilization at 94% during lunch with ticket times at 200s+. '
+                    'Historical data shows this weekday dinner peaks at 55-60 orders/hr. '
+                    'Current 4-person kitchen team cannot sustain that volume without degradation.'
+                ),
+                'suggested_action': 'Call in one off-duty kitchen team member (Tyler or Sarah) for a 4:00 PM - 10:00 PM shift.',
                 'is_active': True,
             },
             {
-                'snap': cooldown_snaps[0] if cooldown_snaps else lunch_snapshots[24],
+                'snap': _pick(peak_snaps, 1, lunch_snapshots, 14),
+                'rec_type': 'operations',
+                'priority': 'medium',
+                'title': 'Reduce drive-thru menu options to speed throughput',
+                'description': (
+                    'During extreme queue conditions, temporarily limiting drive-thru to top 8 menu items '
+                    'can reduce average prep time by 25%. This is a standard QSR surge protocol used by major chains.'
+                ),
+                'rationale': (
+                    'Top 8 items account for 72% of drive-thru orders. Complex specialty items add 45-90 seconds to prep time. '
+                    'Temporary simplification during peak reduces kitchen cognitive load and speeds assembly line.'
+                ),
+                'suggested_action': 'Post "Express Menu" signage at drive-thru order board. Limit to: Classic Burger, Cheeseburger, Chicken Sandwich, Nuggets (6/10), Fries (S/M/L), Drinks, Shakes.',
+                'is_active': True,
+            },
+            {
+                'snap': _pick(peak_snaps, 5, lunch_snapshots, 18),
                 'rec_type': 'prep',
                 'priority': 'medium',
-                'title': 'Start prepping dinner rush items',
-                'description': 'Lunch rush is subsiding. Begin preparation for dinner shift items to ensure smooth transition.',
-                'rationale': 'Order volume declining, dinner shift starts in 3 hours. Prep time for key items is 60-90 minutes.',
-                'suggested_action': 'Assign one kitchen staff to begin dinner prep: marinate chicken, portion burger patties, prep salad ingredients.',
-                'is_active': True,
-            },
-            {
-                'snap': cooldown_snaps[1] if len(cooldown_snaps) > 1 else lunch_snapshots[26],
-                'rec_type': 'labor',
-                'priority': 'low',
-                'title': 'Front counter staff can take break',
-                'description': 'Order volume has dropped significantly. Front counter is overstaffed for current demand level.',
-                'rationale': 'Current orders at 22/hr with 3 front staff. One can take a 15-minute break without impact.',
-                'suggested_action': 'Send one front counter staff on break rotation.',
+                'title': 'Begin dinner prep during any staffing slack',
+                'description': (
+                    'Dinner shift starts at 16:00. Key dinner items need marination (45 min), '
+                    'portioning (30 min), and staging. If any staff become available during the '
+                    'current rush, redirect them to prep work.'
+                ),
+                'rationale': (
+                    'Dinner shift starts in ~3.5 hours. Chicken marination requires 45 min. '
+                    'Burger patty portioning takes 30 min. Starting when possible ensures readiness.'
+                ),
+                'suggested_action': 'When drive-thru queue drops below 10, assign 1 kitchen staff to dinner prep: marinate 60 chicken breasts, portion 80 burger patties.',
                 'is_active': False,
             },
+            # --- LOW PRIORITY ---
             {
-                'snap': peak_snaps[4] if len(peak_snaps) > 4 else lunch_snapshots[20],
-                'rec_type': 'alert',
-                'priority': 'high',
-                'title': 'Drive-thru queue exceeding 5 minutes',
-                'description': 'Drive-thru average wait time has spiked above acceptable levels. Immediate action needed to prevent customer abandonment.',
-                'rationale': f'Drive-thru ticket time: {peak_snaps[4].avg_ticket_time_sec if len(peak_snaps) > 4 else 240}s. Target max: 180s. Queue depth estimated at 8+ vehicles.',
-                'suggested_action': 'Open second drive-thru window or dedicate one staff to expediting drive-thru orders.',
-                'is_active': False,
-            },
-            {
-                'snap': peak_snaps[1] if len(peak_snaps) > 1 else lunch_snapshots[16],
+                'snap': _pick(ramp_snaps, -1, lunch_snapshots, 10),
                 'rec_type': 'prep',
                 'priority': 'low',
-                'title': 'Restock cup station',
-                'description': 'Large cup inventory is below 50% of par. Restocking now prevents interruption during continued service.',
-                'rationale': 'Large cups at 200 of 500 par. Estimated usage: ~80 cups/hour during peak.',
-                'suggested_action': 'Have front staff restock cup station from storage during next low point.',
+                'title': 'Pre-stage delivery packaging for anticipated pickup surge',
+                'description': (
+                    'Delivery orders are running 20% above forecast. Based on historical patterns, '
+                    'a secondary delivery surge is expected between 5:00-6:30 PM. '
+                    'Pre-staging bags, napkins, and utensil packs now prevents scrambling during dinner.'
+                ),
+                'rationale': (
+                    'Current delivery volume: 12 orders/hr (forecast was 10). '
+                    'Historical Thursday dinner delivery peaks at 18-22 orders/hr. '
+                    'Each delivery order requires bag assembly averaging 45 seconds.'
+                ),
+                'suggested_action': 'Pre-assemble 50 delivery bags with napkins, utensils, and condiment packs. Stage near expo station.',
                 'is_active': False,
             },
             {
-                'snap': peak_snaps[0] if peak_snaps else lunch_snapshots[13],
+                'snap': _pick(ramp_snaps, -2, lunch_snapshots, 8),
                 'rec_type': 'labor',
-                'priority': 'high',
-                'title': 'Activate overflow prep station',
-                'description': 'Order backlog growing. Opening the secondary prep station will increase throughput by approximately 30%.',
-                'rationale': 'Ticket time trending upward with no sign of volume decrease. Secondary station can handle sandwich assembly.',
-                'suggested_action': 'Open overflow prep station and assign one staff member from front.',
+                'priority': 'low',
+                'title': 'Plan staggered breaks after peak subsides',
+                'description': (
+                    'Once the current rush subsides, front counter staff should take staggered breaks '
+                    'to ensure everyone is fresh for dinner. Schedule 15-minute breaks in rotation.'
+                ),
+                'rationale': (
+                    'Staff have been at high utilization since 11:00 AM. Break rotation during '
+                    'afternoon lull ensures compliance and prevents fatigue-related errors during dinner.'
+                ),
+                'suggested_action': 'After orders drop below 25/hr, send front staff on 15-minute staggered breaks. Maintain 2 staff minimum.',
                 'is_active': False,
             },
             {
-                'snap': cooldown_snaps[2] if len(cooldown_snaps) > 2 else lunch_snapshots[28],
+                'snap': _pick(peak_snaps, 1, lunch_snapshots, 14),
                 'rec_type': 'inventory',
                 'priority': 'low',
-                'title': 'Review end-of-day inventory counts',
-                'description': 'Multiple items dropped below thresholds during lunch. Recommend a full inventory count before dinner rush.',
-                'rationale': 'Chicken, fries, and cups all hit low levels. Accurate counts needed for dinner planning.',
-                'suggested_action': 'Assign one team member to do a quick physical count of top 5 items.',
+                'title': 'Restock cup and napkin stations when possible',
+                'description': (
+                    'Large cups at 200 of 500 par (40%) and napkins at 350 of 1000 par (35%). '
+                    'Restocking during the next lull prevents interruption during dinner service.'
+                ),
+                'rationale': (
+                    'Estimated cup usage: 80/hr during peak. Napkin usage: 120/hr. '
+                    'Current levels will last approximately 2.5 hours. Dinner rush starts in ~3 hours.'
+                ),
+                'suggested_action': 'Have one front staff restock cup dispenser, napkin holders, and condiment station from back storage during next slow moment.',
+                'is_active': False,
+            },
+            {
+                'snap': _pick(peak_snaps, 2, lunch_snapshots, 15),
+                'rec_type': 'inventory',
+                'priority': 'low',
+                'title': 'Conduct inventory audit before dinner shift',
+                'description': (
+                    'Multiple items dropped below thresholds during lunch. A 10-minute physical count '
+                    'of critical items will ensure accurate reorder quantities and prevent dinner stockouts.'
+                ),
+                'rationale': (
+                    'Chicken, fries, and cups all hit low levels during peak. '
+                    'System estimates may drift from actuals during high-volume periods. '
+                    'Accurate counts are needed for dinner planning and potential emergency orders.'
+                ),
+                'suggested_action': 'After rush subsides, assign one team member to count: chicken breast, burger patties, french fries, lettuce, large cups. Update POS inventory.',
                 'is_active': False,
             },
         ]
@@ -618,11 +702,12 @@ def seed_recommendation_actions(recommendations, users_map, shifts):
             u for u in users_map[downtown_lunch.restaurant_id] if u.role == 'manager'
         )
         action_defs = [
-            (0, 'accepted', 'Moved Sarah to grill station'),
-            (1, 'deferred', 'Monitoring for 15 more minutes'),
-            (2, 'accepted', 'Placed emergency order with supplier'),
-            (6, 'accepted', 'Opened second drive-thru window'),
-            (7, 'rejected', 'Already handled by morning crew'),
+            (0, 'accepted', 'Moving Tyler from register 2 to drive-thru window 2'),
+            (1, 'accepted', 'Pulled 40 chicken from freezer, calling supplier for emergency delivery'),
+            (2, 'deferred', 'Monitoring queue — will open window 2 if it hits 18 vehicles'),
+            (3, 'deferred', 'Will decide in 30 minutes based on afternoon trend'),
+            (5, 'accepted', 'Assigned Maria to start dinner prep at station 3'),
+            (8, 'rejected', 'Morning crew already restocked — levels are fine'),
         ]
         for idx, response, notes in action_defs:
             if idx < len(today_recs):
@@ -695,41 +780,49 @@ def seed_alerts(shifts, lunch_snapshots, users_map):
             u for u in users_map[downtown_lunch.restaurant_id] if u.role == 'manager'
         )
         peak_snaps = [s for s in lunch_snapshots if s.avg_ticket_time_sec >= 150]
-        cooldown_snaps = [s for s in lunch_snapshots if s.avg_ticket_time_sec < 130]
+        ramp_snaps = [s for s in lunch_snapshots if s.avg_ticket_time_sec < 150]
 
-        _critical_snap = peak_snaps[2] if len(peak_snaps) > 2 else lunch_snapshots[15]
-        _surge_snap = peak_snaps[1] if len(peak_snaps) > 1 else lunch_snapshots[14]
-        _labor_snap = peak_snaps[3] if len(peak_snaps) > 3 else lunch_snapshots[17]
-        _warn_snap = peak_snaps[4] if len(peak_snaps) > 4 else (peak_snaps[-1] if peak_snaps else lunch_snapshots[17])
-        _front_snap = cooldown_snaps[0] if cooldown_snaps else lunch_snapshots[25]
+        def _apick(lst, idx, fallback_lst, fallback_idx):
+            if len(lst) > idx:
+                return lst[idx]
+            return fallback_lst[min(fallback_idx, len(fallback_lst) - 1)]
+
+        _critical_snap = _apick(peak_snaps, 2, lunch_snapshots, 15)
+        _surge_snap = _apick(peak_snaps, 1, lunch_snapshots, 14)
+        _labor_snap = _apick(peak_snaps, 3, lunch_snapshots, 16)
+        _warn_snap = _apick(peak_snaps, 4, lunch_snapshots, 17)
+        _front_snap = _apick(ramp_snaps, -1, lunch_snapshots, 10)
+        _delivery_snap = _apick(peak_snaps, 5, lunch_snapshots, 18)
         _labor_orders = _labor_snap.total_orders or 52
         _labor_ratio = round(_labor_orders / 3, 1)
         _surge_orders = _surge_snap.total_orders or 45
         _surge_avg = int(_surge_orders * 0.6)
         _surge_pct = round((_surge_orders / max(_surge_avg, 1)) * 100)
-        _front_dine = _front_snap.dine_in_orders if _front_snap.dine_in_orders else 5
+        _front_dine = _front_snap.dine_in_orders if _front_snap.dine_in_orders else 4
 
         alert_defs = [
+            # --- CRITICAL alerts ---
+            {
+                'snap': _surge_snap,
+                'alert_type': 'queue_surge',
+                'severity': 'critical',
+                'message': (
+                    f'Drive-thru queue exceeding 15 vehicles. '
+                    f'Current queue depth estimated at 16 vehicles with avg wait of 6.2 minutes. '
+                    f'Customer abandonment risk is elevated. '
+                    f'300s threshold breached.'
+                ),
+                'ack': False,
+            },
             {
                 'snap': _critical_snap,
                 'alert_type': 'ticket_time_critical',
                 'severity': 'critical',
                 'message': (
-                    f'Drive-thru average wait time exceeds 5 minutes. '
+                    f'Kitchen ticket time at 312 seconds — 4x above 78s target. '
                     f'Current avg ticket time: 312s '
                     f'across {_critical_snap.total_orders or 48} active orders. '
-                    f'300s threshold breached.'
-                ),
-                'ack': True,
-            },
-            {
-                'snap': _surge_snap,
-                'alert_type': 'queue_surge',
-                'severity': 'warning',
-                'message': (
-                    f'Total order queue is {_surge_pct}% above the 30-minute trailing average '
-                    f'({_surge_orders} orders vs {_surge_avg} avg). '
-                    f'150% threshold breached.'
+                    f'300s threshold breached. Immediate kitchen intervention required.'
                 ),
                 'ack': True,
             },
@@ -738,37 +831,37 @@ def seed_alerts(shifts, lunch_snapshots, users_map):
                 'alert_type': 'labor_imbalance',
                 'severity': 'critical',
                 'message': (
-                    f'Kitchen understaffed: 3 staff handling '
+                    f'Kitchen severely understaffed: 3 staff handling '
                     f'{_labor_orders}+ orders/hr '
-                    f'(ratio: {_labor_ratio}:1, threshold: 10:1).'
+                    f'(ratio: {_labor_ratio}:1, threshold: 10:1). '
+                    f'Ticket times accelerating. Reallocate staff immediately.'
                 ),
                 'ack': False,
             },
+            # --- WARNING alerts ---
             {
-                'snap': peak_snaps[4] if len(peak_snaps) > 4 else lunch_snapshots[19],
+                'snap': _apick(peak_snaps, 4, lunch_snapshots, 17),
                 'alert_type': 'stockout_risk',
                 'severity': 'warning',
-                'message': 'chicken_breast at 15% of daily par level (15 pieces remaining). Estimated depletion imminent at current rate.',
+                'message': (
+                    'Chicken inventory below 15% of par level — only 14 pieces remaining '
+                    'vs 100 par. At current consumption rate of ~2.1 pieces/min, '
+                    'projected stockout in approximately 7 minutes.'
+                ),
                 'ack': False,
-            },
-            {
-                'snap': peak_snaps[0] if peak_snaps else lunch_snapshots[13],
-                'alert_type': 'stockout_risk',
-                'severity': 'info',
-                'message': 'french_fries at 25% of daily par level (20 lbs remaining). Estimated depletion imminent at current rate.',
-                'ack': True,
             },
             {
                 'snap': _front_snap,
                 'alert_type': 'labor_overstaffed_front',
                 'severity': 'warning',
                 'message': (
-                    f'Front counter overstaffed relative to current demand. '
-                    f'{_front_snap.front_staff or 3} staff for {_front_dine} dine-in orders '
+                    f'Front counter overstaffed — {_front_snap.front_staff or 3} staff for '
+                    f'{_front_dine} dine-in orders '
                     f'(ratio: {round(_front_dine / max(_front_snap.front_staff or 3, 1), 1)}:1, '
-                    f'threshold: 3.0:1).'
+                    f'threshold: 3.0:1). '
+                    f'Consider reallocating 1 staff to drive-thru or kitchen.'
                 ),
-                'ack': False,
+                'ack': True,
             },
             {
                 'snap': _warn_snap,
@@ -777,7 +870,31 @@ def seed_alerts(shifts, lunch_snapshots, users_map):
                 'message': (
                     f'Average ticket time is '
                     f'{_warn_snap.avg_ticket_time_sec or 195}s, exceeding the '
-                    f'180s warning threshold. Monitor closely to prevent further degradation.'
+                    f'180s warning threshold. '
+                    f'Trending upward for last 15 minutes. Monitor closely to prevent further degradation.'
+                ),
+                'ack': True,
+            },
+            # --- INFO alerts ---
+            {
+                'snap': _delivery_snap,
+                'alert_type': 'demand_surge',
+                'severity': 'info',
+                'message': (
+                    f'Delivery orders trending 20% above forecast — '
+                    f'{_delivery_snap.delivery_orders or 12} delivery orders vs '
+                    f'{int((_delivery_snap.delivery_orders or 12) * 0.83)} predicted. '
+                    f'Consider pre-staging packaging and coordinating with delivery drivers.'
+                ),
+                'ack': True,
+            },
+            {
+                'snap': _apick(peak_snaps, 0, lunch_snapshots, 13),
+                'alert_type': 'stockout_risk',
+                'severity': 'info',
+                'message': (
+                    'French fries at 25% of daily par level (20 lbs remaining). '
+                    'Current usage rate is moderate. Next prep batch recommended within 30 minutes.'
                 ),
                 'ack': True,
             },
@@ -828,6 +945,11 @@ def seed_alerts(shifts, lunch_snapshots, users_map):
             'alert_type': 'labor_overstaffed_front',
             'severity': 'info',
             'message': 'Front counter overstaffed relative to current demand. {staff} staff for {orders} dine-in orders (consider rebalancing).',
+        },
+        {
+            'alert_type': 'demand_surge',
+            'severity': 'info',
+            'message': 'Delivery orders trending {pct}% above forecast ({orders} orders vs {avg} predicted). Consider pre-staging packaging.',
         },
     ]
 
@@ -902,6 +1024,165 @@ def seed_settings(restaurants):
     return len(restaurants)
 
 
+def seed_staff(restaurants):
+    """Create staff members and schedules for the Downtown Dallas restaurant."""
+    today = date.today()
+    dallas = restaurants[0]  # Downtown Dallas is the first restaurant
+
+    staff_defs = [
+        ('Maria', 'Rodriguez', 'Shift Lead', '214-555-0101', 'maria.r@dallas.opsync.com', date(2024, 3, 15)),
+        ('James', 'Chen', 'Line Cook', '214-555-0102', 'james.c@dallas.opsync.com', date(2024, 6, 20)),
+        ('Aisha', 'Thompson', 'Cashier', '214-555-0103', 'aisha.t@dallas.opsync.com', date(2024, 9, 1)),
+        ('Carlos', 'Mendez', 'Prep Cook', '214-555-0104', 'carlos.m@dallas.opsync.com', date(2024, 1, 10)),
+        ('Sarah', 'Kim', 'Drive-Thru', '214-555-0105', 'sarah.k@dallas.opsync.com', date(2025, 2, 14)),
+        ('Devon', 'Washington', 'Line Cook', '214-555-0106', 'devon.w@dallas.opsync.com', date(2024, 11, 5)),
+        ('Emily', 'Nguyen', 'Cashier', '214-555-0107', 'emily.n@dallas.opsync.com', date(2025, 4, 22)),
+        ('Marcus', 'Johnson', 'Dishwasher', '214-555-0108', 'marcus.j@dallas.opsync.com', date(2025, 1, 8)),
+        ('Priya', 'Patel', 'Shift Lead', '214-555-0109', 'priya.p@dallas.opsync.com', date(2024, 5, 30)),
+        ('Tyler', 'Brooks', 'Prep Cook', '214-555-0110', 'tyler.b@dallas.opsync.com', date(2025, 3, 17)),
+        ('Jessica', 'Ramirez', 'Drive-Thru', '214-555-0111', 'jessica.r@dallas.opsync.com', date(2024, 8, 12)),
+        ('Daniel', "O'Brien", 'Line Cook', '214-555-0112', 'daniel.o@dallas.opsync.com', date(2025, 5, 1)),
+    ]
+
+    # Position-based shift patterns: (shift_type, start_time, end_time, hours)
+    shift_patterns = {
+        'Shift Lead':  ('morning', '06:00', '14:00', 8.0),
+        'Line Cook':   ('morning', '06:00', '14:00', 8.0),  # default, will rotate
+        'Cashier':     ('afternoon', '11:00', '19:00', 8.0),
+        'Prep Cook':   ('morning', '06:00', '14:00', 8.0),
+        'Drive-Thru':  ('afternoon', '11:00', '19:00', 8.0),
+        'Dishwasher':  ('evening', '16:00', '23:00', 7.0),
+    }
+
+    # Alternate patterns for line cooks to rotate shifts
+    line_cook_rotations = [
+        ('morning', '06:00', '14:00', 8.0),
+        ('afternoon', '11:00', '19:00', 8.0),
+        ('evening', '16:00', '23:00', 7.0),
+    ]
+
+    members = []
+    for first, last, position, phone, email, hire_date in staff_defs:
+        member = StaffMember(
+            restaurant_id=dallas.restaurant_id,
+            first_name=first,
+            last_name=last,
+            position=position,
+            phone=phone,
+            email=email,
+            hire_date=hire_date,
+            status='active',
+        )
+        db.session.add(member)
+        members.append(member)
+
+    db.session.commit()
+
+    # Called-out entries: assign 1-2 called_out days across all staff over the 30-day window
+    # Pick specific (member_index, day_offset) pairs for called_out
+    called_out_entries = {
+        (1, 5),   # James Chen called out 5 days ago
+        (6, 12),  # Emily Nguyen called out 12 days ago
+        (4, 20),  # Sarah Kim called out 20 days ago
+    }
+
+    # Generate schedules for past 30 days + rest of current week
+    # Find the Monday of the current week
+    current_monday = today - timedelta(days=today.weekday())
+    current_sunday = current_monday + timedelta(days=6)
+
+    # Start from 30 days ago
+    start_date = today - timedelta(days=30)
+
+    schedule_count = 0
+    for member_idx, member in enumerate(members):
+        position = member.position
+        base_pattern = shift_patterns[position]
+
+        # Each employee has a consistent set of days off per week
+        # Assign 2-3 off days per week, varying by employee
+        # Use member_idx to create different day-off patterns
+        off_day_sets = [
+            {0, 4},     # Mon, Fri off
+            {2, 6},     # Wed, Sun off
+            {1, 5},     # Tue, Sat off
+            {3, 6},     # Thu, Sun off
+            {0, 3},     # Mon, Thu off
+            {5, 6},     # Sat, Sun off
+            {1, 4},     # Tue, Fri off
+            {2, 5},     # Wed, Sat off
+            {0, 6},     # Mon, Sun off
+            {3, 5},     # Thu, Sat off
+            {1, 6},     # Tue, Sun off
+            {2, 4},     # Wed, Fri off
+        ]
+        off_days = off_day_sets[member_idx % len(off_day_sets)]
+
+        current_date = start_date
+        while current_date <= current_sunday:
+            weekday = current_date.weekday()
+
+            # Check if this is a called_out day
+            day_offset = (today - current_date).days
+            is_called_out = (member_idx, day_offset) in called_out_entries
+
+            if is_called_out:
+                # Called out - they were scheduled but called out
+                shift_type, start_time, end_time, hours = base_pattern
+                schedule = StaffSchedule(
+                    staff_id=member.staff_id,
+                    date=current_date,
+                    shift_type=shift_type,
+                    start_time=start_time,
+                    end_time=end_time,
+                    status='called_out',
+                    hours=0,
+                )
+            elif weekday in off_days:
+                # Day off
+                schedule = StaffSchedule(
+                    staff_id=member.staff_id,
+                    date=current_date,
+                    shift_type=None,
+                    start_time=None,
+                    end_time=None,
+                    status='off',
+                    hours=0,
+                )
+            else:
+                # Working day - determine shift based on position
+                if position == 'Line Cook':
+                    # Rotate line cooks through different shifts based on week
+                    week_num = current_date.isocalendar()[1]
+                    rotation_idx = (member_idx + week_num) % len(line_cook_rotations)
+                    shift_type, start_time, end_time, hours = line_cook_rotations[rotation_idx]
+                else:
+                    shift_type, start_time, end_time, hours = base_pattern
+
+                # Determine status: past = completed, today/future = scheduled
+                if current_date < today:
+                    status = 'completed'
+                else:
+                    status = 'scheduled'
+
+                schedule = StaffSchedule(
+                    staff_id=member.staff_id,
+                    date=current_date,
+                    shift_type=shift_type,
+                    start_time=start_time,
+                    end_time=end_time,
+                    status=status,
+                    hours=hours,
+                )
+
+            db.session.add(schedule)
+            schedule_count += 1
+            current_date += timedelta(days=1)
+
+    db.session.commit()
+    return members, schedule_count
+
+
 def seed_all():
     """Run the complete seed pipeline."""
     print("Starting database seed...")
@@ -930,7 +1211,10 @@ def seed_all():
     print(f"  Created recommendation actions")
 
     historical_alert_count = seed_alerts(shifts, lunch_snapshots, users_map)
-    print(f"  Created 7 today alerts + {historical_alert_count} historical alerts")
+    print(f"  Created 8 today alerts + {historical_alert_count} historical alerts")
+
+    staff_members, schedule_count = seed_staff(restaurants)
+    print(f"  Created {len(staff_members)} staff members with {schedule_count} schedule entries")
 
     print("\nDatabase seed complete!")
     print("  Test login: admin@dallas.opsync.com / admin123")

@@ -61,8 +61,9 @@ def get_trends():
     restaurant_id = request.args.get('restaurant_id', claims.get('restaurant_id'))
     days = request.args.get('days', 7, type=int)
     shift_id = request.args.get('shift_id')
+    filter_date = request.args.get('date')
 
-    result = DashboardService.get_trends(restaurant_id, days, shift_id=shift_id)
+    result = DashboardService.get_trends(restaurant_id, days, shift_id=shift_id, filter_date=filter_date)
     return jsonify(result), 200
 
 

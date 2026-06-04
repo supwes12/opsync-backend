@@ -42,7 +42,7 @@ class DashboardService:
                 'forecast': {
                     'predicted_orders_30min': 0,
                     'predicted_orders_60min': 0,
-                    'confidence': 'none',
+                    'confidence': 0.0,
                 },
             }
 
@@ -83,10 +83,12 @@ class DashboardService:
         forecast_raw = ForecastService.forecast_demand(shift.shift_id, horizon_minutes=30)
         forecast_60 = ForecastService.forecast_demand(shift.shift_id, horizon_minutes=60)
 
+        confidence_map = {'high': 0.9, 'medium': 0.7, 'low': 0.5, 'none': 0.0}
+        raw_confidence = forecast_raw.get('confidence', 'low')
         forecast = {
             'predicted_orders_30min': forecast_raw.get('predicted_total_orders', 0),
             'predicted_orders_60min': forecast_60.get('predicted_total_orders', 0),
-            'confidence': forecast_raw.get('confidence', 'low'),
+            'confidence': confidence_map.get(raw_confidence, 0.5),
         }
 
         return {
@@ -173,14 +175,27 @@ class DashboardService:
         }
 
     @staticmethod
-    def get_trends(restaurant_id, days=7, shift_id=None):
-        cutoff = datetime.now() - timedelta(days=days)
+    def get_trends(restaurant_id, days=7, shift_id=None, filter_date=None):
         query = Shift.query.filter(
             Shift.restaurant_id == restaurant_id,
-            Shift.shift_date >= cutoff.date(),
         )
         if shift_id:
             query = query.filter(Shift.shift_id == shift_id)
+        if filter_date:
+            from datetime import date as date_type
+            try:
+                d = date_type.fromisoformat(filter_date)
+                # Show the selected date plus 3 days before it for context
+                range_start = d - timedelta(days=3)
+                query = query.filter(Shift.shift_date >= range_start, Shift.shift_date <= d)
+            except (ValueError, TypeError):
+                # Bad date string — fall back to days-based cutoff
+                cutoff = datetime.now() - timedelta(days=days)
+                query = query.filter(Shift.shift_date >= cutoff.date())
+        else:
+            # No specific date selected — use the days-based cutoff
+            cutoff = datetime.now() - timedelta(days=days)
+            query = query.filter(Shift.shift_date >= cutoff.date())
         shifts = query.order_by(Shift.shift_date).all()
 
         daily_data = {}
@@ -188,7 +203,11 @@ class DashboardService:
         alert_counts = {}
         total_recs_generated = 0
         total_recs_accepted = 0
-        staff_by_hour = {}  # {hour: [staff_counts...]}
+        total_recs_deferred = 0
+        total_recs_rejected = 0
+        staff_by_day_hour = {}  # {(day_name, hour_int): [ratios...]}
+
+        DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
         for shift in shifts:
             date_key = shift.shift_date.isoformat()
@@ -214,22 +233,28 @@ class DashboardService:
                 if s.avg_ticket_time_sec:
                     all_ticket_times.append(s.avg_ticket_time_sec)
 
-                # Staff utilization heatmap: group by hour
+                # Staff utilization heatmap: group by day-of-week AND hour
                 if s.captured_at:
-                    hour_key = s.captured_at.strftime('%H:00')
-                    if hour_key not in staff_by_hour:
-                        staff_by_hour[hour_key] = []
+                    day_name = DAY_NAMES[s.captured_at.weekday()]
+                    hour_int = s.captured_at.hour
+                    key = (day_name, hour_int)
+                    if key not in staff_by_day_hour:
+                        staff_by_day_hour[key] = []
                     staff_count = max(s.staff_count, 1) if s.staff_count else 1
                     ratio = min(1.0, round((s.total_orders or 0) / (staff_count * 8), 2))
-                    staff_by_hour[hour_key].append(ratio)
+                    staff_by_day_hour[key].append(ratio)
 
             recs = shift.recommendations.all()
             daily_data[date_key]['recommendations_generated'] += len(recs)
             total_recs_generated += len(recs)
             for rec in recs:
                 accepted = rec.actions.filter_by(response_type='accepted').count()
+                deferred = rec.actions.filter_by(response_type='deferred').count()
+                rejected = rec.actions.filter_by(response_type='rejected').count()
                 daily_data[date_key]['recommendations_accepted'] += accepted
                 total_recs_accepted += accepted
+                total_recs_deferred += deferred
+                total_recs_rejected += rejected
 
             # Count alerts by type
             alerts = shift.alerts.all()
@@ -272,21 +297,27 @@ class DashboardService:
             for bucket, count in ticket_buckets.items()
         ]
 
-        # Build staff_utilization_heatmap
+        # Build staff_utilization_heatmap grouped by day-of-week and hour
         staff_utilization_heatmap = []
-        for hour_key in sorted(staff_by_hour.keys()):
-            ratios = staff_by_hour[hour_key]
+        for (day_name, hour_int), ratios in sorted(
+            staff_by_day_hour.items(),
+            key=lambda x: (DAY_NAMES.index(x[0][0]), x[0][1])
+        ):
             avg_ratio = round(sum(ratios) / len(ratios), 2) if ratios else 0
             staff_utilization_heatmap.append({
-                'hour': hour_key,
-                'avg_utilization': avg_ratio,
-                'sample_count': len(ratios),
+                'day': day_name,
+                'hour': hour_int,
+                'utilization': avg_ratio,
             })
 
-        # Build recommendation_acceptance_rate
-        recommendation_acceptance_rate = round(
-            (total_recs_accepted / total_recs_generated * 100) if total_recs_generated > 0 else 0, 1
-        )
+        # Build recommendation_acceptance_rate as array of segments
+        total_recs_no_action = total_recs_generated - total_recs_accepted - total_recs_deferred - total_recs_rejected
+        recommendation_acceptance_rate = [
+            {'status': 'Accepted', 'count': total_recs_accepted},
+            {'status': 'Deferred', 'count': total_recs_deferred},
+            {'status': 'Rejected', 'count': total_recs_rejected},
+            {'status': 'Pending', 'count': max(0, total_recs_no_action)},
+        ]
 
         # Build alert_frequency
         alert_frequency = [

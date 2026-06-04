@@ -13,6 +13,7 @@ def register_blueprints(app):
     from app.api.settings import settings_bp
     from app.api.snapshots import snapshots_bp
     from app.api.audit import audit_bp
+    from app.api.staff import staff_bp
 
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(dashboard_bp, url_prefix='/api/dashboard')
@@ -23,6 +24,7 @@ def register_blueprints(app):
     app.register_blueprint(settings_bp, url_prefix='/api/settings')
     app.register_blueprint(snapshots_bp, url_prefix='/api/snapshots')
     app.register_blueprint(audit_bp, url_prefix='/api/audit')
+    app.register_blueprint(staff_bp, url_prefix='/api/staff')
 
     # Task 1: Health check endpoint (registered directly on app)
     @app.route('/health', methods=['GET'])
