@@ -50,6 +50,12 @@ class DashboardService:
             shift_id=shift.shift_id
         ).order_by(OperationalSnapshot.captured_at.desc()).first()
 
+        if latest_snapshot:
+            from app.services.recommendation_engine import RecommendationEngine
+            from app.services.alert_service import AlertService
+            RecommendationEngine.evaluate(shift.shift_id, latest_snapshot.snapshot_id)
+            AlertService.evaluate(shift.shift_id, latest_snapshot.snapshot_id)
+
         priority_order = case(
             (Recommendation.priority == 'high', 1),
             (Recommendation.priority == 'medium', 2),

@@ -83,8 +83,10 @@ class RecommendationEngine:
             math.ceil(orders_per_hour / RecommendationEngine.FRONT_RATIO)
         )
 
-        current_kitchen = snapshot.kitchen_staff or 0
-        current_front = snapshot.front_staff or 0
+        current_kitchen = snapshot.kitchen_staff
+        current_front = snapshot.front_staff
+        if current_kitchen is None or current_front is None:
+            return recs
         ticket_time = snapshot.avg_ticket_time_sec or 0
 
         kitchen_gap = optimal_kitchen - current_kitchen

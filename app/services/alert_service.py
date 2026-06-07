@@ -71,7 +71,9 @@ class AlertService:
     @staticmethod
     def _check_ticket_time(snapshot):
         alerts = []
-        ticket_time = snapshot.avg_ticket_time_sec or 0
+        ticket_time = snapshot.avg_ticket_time_sec
+        if ticket_time is None:
+            return alerts
 
         if ticket_time >= AlertService.THRESHOLDS['ticket_time_critical']:
             alerts.append({
@@ -164,14 +166,16 @@ class AlertService:
     @staticmethod
     def _check_labor_balance(snapshot):
         alerts = []
-        kitchen_staff = snapshot.kitchen_staff or 0
-        front_staff = snapshot.front_staff or 0
+        kitchen_staff = snapshot.kitchen_staff
+        front_staff = snapshot.front_staff
+        if kitchen_staff is None and front_staff is None:
+            return alerts
         total_orders = snapshot.total_orders or 0
         dine_in = snapshot.dine_in_orders or 0
 
         thresholds = AlertService.THRESHOLDS['staff_order_ratio_min']
 
-        if kitchen_staff > 0:
+        if kitchen_staff is not None and kitchen_staff > 0:
             kitchen_ratio = total_orders / kitchen_staff
             if kitchen_ratio > thresholds['kitchen']:
                 alerts.append({
@@ -184,7 +188,7 @@ class AlertService:
                     ),
                 })
 
-        if front_staff > 0 and dine_in > 0:
+        if front_staff is not None and front_staff > 0 and dine_in > 0:
             front_ratio = dine_in / front_staff
             if front_ratio < 2 and front_staff >= 3:
                 alerts.append({
